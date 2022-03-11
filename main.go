@@ -22,16 +22,15 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
+var createMajor = flag.Bool("major", false, "release major versions on breaking changes")
+var createRelease = flag.Bool("release", true, "create release and tag")
+var createMergeRequest = flag.Bool("merge-request", true, "create merge release for semanticore/release branch")
+
 func try(err error) {
 	if err != nil {
 		panic(err)
 	}
 }
-
-var createMajor = flag.Bool("major", false, "release major versions")
-var createTag = flag.Bool("tag", true, "tags on release commits")
-var createRelease = flag.Bool("release", true, "create release alongside tags (requires tag)")
-var createMergeRequest = flag.Bool("merge-request", true, "create merge release for branch")
 
 func main() {
 	flag.Parse()
@@ -129,7 +128,8 @@ func main() {
 			continue
 		}
 		msg := strings.TrimSpace(commit.Message)
-		if match := reverst.FindStringSubmatch(msg); len(match) == 2 {
+
+		if match := reverst.FindStringSubmatch(msg); match != nil {
 			reverted[match[1]] = struct{}{}
 			continue
 		}
@@ -140,16 +140,17 @@ func main() {
 			patch = newPatch
 			latest = fmt.Sprintf("v%d.%d.%d", major, minor, patch)
 			log.Printf("[semanticore] found version %s at %s: %q", latest, commit.Hash, msg)
-			if backend != nil && (*createTag || *createRelease) {
+			if backend != nil && *createRelease {
 				changelog := ""
 				fi, err := commit.Files()
 				if err == nil {
 					fi.ForEach(func(f *object.File) error {
-						if strings.ToLower(f.Name) == "changelog.md" {
-							c, _ := f.Contents()
-							changelog = "## Version v" + strings.Split(c, "## Version v")[1]
-							changelog = strings.TrimSpace(changelog)
+						if strings.ToLower(f.Name) != "changelog.md" {
+							return nil
 						}
+						c, _ := f.Contents()
+						changelog = "## Version " + strings.Split(c, "## Version ")[1]
+						changelog = strings.TrimSpace(changelog)
 						return nil
 					})
 				}
@@ -158,12 +159,14 @@ func main() {
 			break
 		}
 
+		// ignore merge commits
 		if len(commit.ParentHashes) > 1 {
 			continue
 		}
 		if commit.Committer.When.After(releaseDate) {
 			releaseDate = commit.Committer.When
 		}
+
 		typ, scope, msg, major := internal.ParseCommitMessage(msg)
 		breaking = breaking || major
 		line := fmt.Sprintf("%s (%s)", msg, commit.Hash.String()[:8])
@@ -267,10 +270,12 @@ func main() {
 	}
 
 	cl, _ := ioutil.ReadFile(filepath.Join(filename))
-	if !strings.Contains(string(cl), "# Changelog") {
-		cl = append([]byte(changelog), cl...)
-	} else {
+	if strings.Contains(string(cl), "# Changelog\n\n") {
 		cl = bytes.Replace(cl, []byte("# Changelog\n\n"), []byte(changelog), 1)
+	} else if strings.Contains(string(cl), "# Changelog\n") {
+		cl = bytes.Replace(cl, []byte("# Changelog\n"), []byte(changelog), 1)
+	} else {
+		cl = append([]byte(changelog), cl...)
 	}
 	try(ioutil.WriteFile(filepath.Join(filename), cl, 0644))
 
@@ -322,6 +327,8 @@ func main() {
 There are %s commits since %s.
 
 This is a %s release.
+
+Merge this Pull Request to commit the Changelog and have Semanticore tag the repository and create a new release.
 
 `, major, minor, patch, strings.Join(details, ", "), latest, releasetype)
 	description += changelog
